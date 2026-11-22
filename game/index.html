@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Star Catch — built from one prompt</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0b1026; height: 100%; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="game" width="1080" height="1920"></canvas>
+<script>
+'use strict';
+// Star Catch — a tiny browser game built from one prompt:
+// "Build me a tiny browser game: catch the falling stars in 30 seconds."
+// Move the basket with mouse, touch, or arrow keys. Catch stars, dodge nothing,
+// just don't let them hit the ground. Golden star = 50 points.
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = 1080, H = 1920;
+
+const params = new URLSearchParams(location.search);
+const DEMO = params.get('demo') === '1';
+
+// Seeded RNG so the demo run is the same every time (real gameplay, reproducible).
+let seed = 20261123;
+function rand() {
+  seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+  return seed / 0x7fffffff;
+}
+
+const GAME_SECONDS = 30;
+const state = {
+  mode: 'title', // title | playing | over
+  score: 0,
+  lives: 3,
+  timeLeft: GAME_SECONDS,
+  basketX: W / 2,
+  stars: [],
+  particles: [],
+  caught: 0,
+  missed: 0,
+  startedAt: 0,
+  lastSpawn: 0,
+  flash: 0,
+};
+
+const BASKET_W = 260, BASKET_H = 46, BASKET_Y = H - 260;
+
+function spawnStar() {
+  const golden = rand() < 0.12;
+  state.stars.push({
+    x: 60 + rand() * (W - 120),
+    y: -40,
+    r: golden ? 34 : 26 + rand() * 10,
+    vy: 420 + rand() * 320 + (GAME_SECONDS - state.timeLeft) * 14,
+    vx: (rand() - 0.5) * 90,
+    rot: rand() * Math.PI * 2,
+    vr: (rand() - 0.5) * 3,
+    golden,
+    points: golden ? 50 : 10,
+  });
+}
+
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = rand() * Math.PI * 2, s = 120 + rand() * 320;
+    state.particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 120,
+      life: 0.6 + rand() * 0.4, max: 1, color, r: 4 + rand() * 7 });
+  }
+}
+
+function drawStar(x, y, r, rot, color) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const rad = i % 2 === 0 ? r : r * 0.45;
+    const a = (i * Math.PI) / 5 - Math.PI / 2;
+    ctx[i === 0 ? 'moveTo' : 'lineTo'](Math.cos(a) * rad, Math.sin(a) * rad);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function startGame() {
+  state.mode = 'playing';
+  state.score = 0; state.lives = 3; state.timeLeft = GAME_SECONDS;
+  state.stars = []; state.particles = []; state.caught = 0; state.missed = 0;
+  state.startedAt = performance.now();
+  state.lastSpawn = 0;
+}
+
+function moveBasketTo(x) {
+  state.basketX = Math.max(BASKET_W / 2, Math.min(W - BASKET_W / 2, x));
+}
+
+let keys = {};
+addEventListener('keydown', (e) => {
+  keys[e.key] = true;
+  if (state.mode !== 'playing' && (e.key === ' ' || e.key === 'Enter')) startGame();
+});
+addEventListener('keyup', (e) => { keys[e.key] = false; });
+canvas.addEventListener('pointermove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  moveBasketTo((e.clientX - rect.left) / rect.width * W);
+});
+canvas.addEventListener('pointerdown', () => {
+  if (state.mode !== 'playing') startGame();
+});
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+
+  if (state.mode === 'playing') {
+    state.timeLeft = Math.max(0, GAME_SECONDS - (now - state.startedAt) / 1000);
+
+    // Demo autopilot: chase the lowest star.
+    if (DEMO && state.stars.length) {
+      let target = state.stars[0];
+      for (const s of state.stars) if (s.y > target.y) target = s;
+      const dx = target.x - state.basketX;
+      moveBasketTo(state.basketX + Math.max(-900 * dt, Math.min(900 * dt, dx)));
+    }
+    if (keys['ArrowLeft']) moveBasketTo(state.basketX - 900 * dt);
+    if (keys['ArrowRight']) moveBasketTo(state.basketX + 900 * dt);
+
+    if (now - state.lastSpawn > 420) { spawnStar(); state.lastSpawn = now; }
+
+    for (let i = state.stars.length - 1; i >= 0; i--) {
+      const s = state.stars[i];
+      s.y += s.vy * dt; s.x += s.vx * dt; s.rot += s.vr * dt;
+      if (s.y >= BASKET_Y - 10 && s.y <= BASKET_Y + BASKET_H + 30 &&
+          Math.abs(s.x - state.basketX) < BASKET_W / 2 + s.r * 0.5) {
+        state.score += s.points;
+        state.caught++;
+        burst(s.x, s.y, s.golden ? '#ffd94d' : '#7dd7ff', s.golden ? 26 : 14);
+        state.flash = s.golden ? 0.25 : 0.12;
+        state.stars.splice(i, 1);
+      } else if (s.y > H + 60) {
+        state.stars.splice(i, 1);
+        state.missed++;
+        state.lives--;
+        burst(s.x, H - 40, '#ff5d7a', 10);
+        if (state.lives <= 0) state.mode = 'over';
+      }
+    }
+    if (state.timeLeft <= 0) state.mode = 'over';
+  }
+
+  for (let i = state.particles.length - 1; i >= 0; i--) {
+    const p = state.particles[i];
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 500 * dt; p.life -= dt;
+    if (p.life <= 0) state.particles.splice(i, 1);
+  }
+  if (state.flash > 0) state.flash -= dt;
+
+  draw();
+  requestAnimationFrame(frame);
+}
+
+function draw() {
+  // Night sky.
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#0b1026'); sky.addColorStop(0.6, '#1b2a5e'); sky.addColorStop(1, '#3b2a6e');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H);
+
+  // Static background stars (seeded positions, drawn from a fixed table).
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  for (let i = 0; i < 90; i++) {
+    const bx = (i * 173) % W, by = (i * 311) % 1500;
+    ctx.globalAlpha = 0.25 + ((i * 7) % 10) / 16;
+    ctx.fillRect(bx, by, 3, 3);
+  }
+  ctx.globalAlpha = 1;
+
+  // Moon.
+  ctx.fillStyle = '#f4f1de';
+  ctx.beginPath(); ctx.arc(880, 220, 90, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ddd6b8';
+  ctx.beginPath(); ctx.arc(850, 200, 18, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(910, 250, 12, 0, Math.PI * 2); ctx.fill();
+
+  if (state.mode === 'title') {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffd94d';
+    drawStar(W / 2, 480, 90, 0.4, '#ffd94d');
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 120px system-ui, sans-serif';
+    ctx.fillText('STAR CATCH', W / 2, 720);
+    ctx.font = '44px system-ui, sans-serif';
+    ctx.fillStyle = '#c9d6ff';
+    ctx.fillText('Catch the falling stars in 30 seconds.', W / 2, 820);
+    ctx.fillText('Golden star = 50 points. 3 lives.', W / 2, 890);
+    ctx.font = 'bold 56px system-ui, sans-serif';
+    ctx.fillStyle = '#7dd7ff';
+    ctx.fillText('Tap or press SPACE to play', W / 2, 1080);
+    ctx.font = '36px system-ui, sans-serif';
+    ctx.fillStyle = '#8b93b8';
+    ctx.fillText('Built from ONE prompt by an AI agent', W / 2, 1560);
+    ctx.fillText('on make.fun', W / 2, 1610);
+    return;
+  }
+
+  // HUD.
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 64px system-ui, sans-serif';
+  ctx.fillText('SCORE ' + state.score, 48, 110);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = state.timeLeft <= 5 ? '#ff5d7a' : '#ffffff';
+  ctx.fillText(Math.ceil(state.timeLeft) + 's', W / 2, 110);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#ff5d7a';
+  ctx.fillText('♥'.repeat(Math.max(0, state.lives)) + '♡'.repeat(Math.max(0, 3 - state.lives)), W - 48, 110);
+
+  // Stars.
+  for (const s of state.stars) {
+    drawStar(s.x, s.y, s.r, s.rot, s.golden ? '#ffd94d' : '#7dd7ff');
+  }
+
+  // Particles.
+  for (const p of state.particles) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max);
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Ground.
+  ctx.fillStyle = '#101736';
+  ctx.fillRect(0, H - 120, W, 120);
+  ctx.fillStyle = '#2c3a6e';
+  ctx.fillRect(0, H - 120, W, 6);
+
+  // Basket.
+  const bx = state.basketX - BASKET_W / 2;
+  ctx.fillStyle = '#ff9f43';
+  ctx.beginPath();
+  ctx.moveTo(bx, BASKET_Y);
+  ctx.lineTo(bx + BASKET_W, BASKET_Y);
+  ctx.lineTo(bx + BASKET_W - 24, BASKET_Y + BASKET_H + 26);
+  ctx.lineTo(bx + 24, BASKET_Y + BASKET_H + 26);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#e8892b';
+  ctx.fillRect(bx + 8, BASKET_Y + 16, BASKET_W - 16, 8);
+
+  if (state.flash > 0) {
+    ctx.fillStyle = `rgba(255, 217, 77, ${state.flash})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  if (state.mode === 'over') {
+    ctx.fillStyle = 'rgba(8, 10, 30, 0.82)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 110px system-ui, sans-serif';
+    ctx.fillText('TIME UP!', W / 2, 760);
+    ctx.font = 'bold 160px system-ui, sans-serif';
+    ctx.fillStyle = '#ffd94d';
+    ctx.fillText(state.score + ' PTS', W / 2, 960);
+    ctx.font = '48px system-ui, sans-serif';
+    ctx.fillStyle = '#c9d6ff';
+    ctx.fillText(state.caught + ' stars caught · ' + state.missed + ' missed', W / 2, 1060);
+    ctx.font = 'bold 52px system-ui, sans-serif';
+    ctx.fillStyle = '#7dd7ff';
+    ctx.fillText('Made by my AI agent on make.fun', W / 2, 1240);
+  }
+}
+
+if (DEMO) startGame();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
